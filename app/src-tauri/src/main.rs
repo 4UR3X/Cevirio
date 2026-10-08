@@ -1,7 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod capture;
+mod live;
 mod ocr;
+mod overlay;
 mod translate;
 
 use tauri::Manager;
@@ -18,26 +20,42 @@ fn app_info() -> serde_json::Value {
 }
 
 fn main() {
-    let capture_key = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyX);
+    let mods = Some(Modifiers::CONTROL | Modifiers::SHIFT);
+    let key_capture = Shortcut::new(mods, Code::KeyX);
+    let key_live = Shortcut::new(mods, Code::KeyL);
+    let key_hide = Shortcut::new(mods, Code::KeyH);
 
     tauri::Builder::default()
         .manage(capture::Session::default())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(move |app, shortcut, event| {
-                    if shortcut == &capture_key && event.state() == ShortcutState::Pressed {
-                        let app = app.clone();
-                        std::thread::spawn(move || {
-                            let _ = capture::begin(&app);
-                        });
+                    if event.state() != ShortcutState::Pressed {
+                        return;
                     }
+                    let app = app.clone();
+                    let shortcut = *shortcut;
+                    std::thread::spawn(move || {
+                        if shortcut == key_capture {
+                            let _ = capture::begin(&app);
+                        } else if shortcut == key_live {
+                            let _ = live::toggle(&app);
+                        } else if shortcut == key_hide {
+                            if let Some(w) = app.get_webview_window("overlay") {
+                                let _ = w.close();
+                            }
+                        }
+                    });
                 })
                 .build(),
         )
         .setup(move |app| {
             let dir = app.path().app_data_dir()?;
             app.manage(translate::Translator::open(dir)?);
-            app.global_shortcut().register(capture_key)?;
+            let gs = app.global_shortcut();
+            gs.register(key_capture)?;
+            gs.register(key_live)?;
+            gs.register(key_hide)?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -51,7 +69,10 @@ fn main() {
             translate::translate_text,
             translate::get_settings,
             translate::save_settings,
-            translate::clear_cache
+            translate::clear_cache,
+            overlay::get_last_translation,
+            overlay::hide_overlay,
+            live::toggle_live
         ])
         .run(tauri::generate_context!())
         .expect("Çevirio başlatılamadı");

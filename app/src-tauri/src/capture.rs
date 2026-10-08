@@ -14,12 +14,40 @@ use image::{
 };
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
+#[derive(Clone, Copy)]
+pub struct Region {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+    pub mon_x: i32,
+    pub mon_y: i32,
+}
+
 #[derive(Default)]
 pub struct Session {
     frozen: Mutex<Option<RgbaImage>>,
     last: Mutex<Option<RgbaImage>>,
     hid_main: AtomicBool,
     lang: Mutex<Option<String>>,
+    monitor_id: Mutex<Option<u32>>,
+    mon_origin: Mutex<(i32, i32)>,
+    region: Mutex<Option<Region>>,
+    last_ocr: Mutex<String>,
+    pub last_translation: Mutex<String>,
+    pub live: AtomicBool,
+}
+
+impl Session {
+    pub fn region(&self) -> Option<Region> {
+        *self.region.lock().unwrap()
+    }
+    pub fn monitor_id(&self) -> Option<u32> {
+        *self.monitor_id.lock().unwrap()
+    }
+    pub fn lang(&self) -> Option<String> {
+        self.lang.lock().unwrap().clone()
+    }
 }
 
 fn to_data_url(img: &RgbaImage) -> Result<String, String> {
@@ -44,14 +72,18 @@ pub fn begin(app: &AppHandle) -> Result<(), String> {
         return Ok(());
     }
     let session = app.state::<Session>();
+    session.live.store(false, Ordering::SeqCst);
 
     if let Some(main) = app.get_webview_window("main") {
         if main.is_visible().unwrap_or(false) && !main.is_minimized().unwrap_or(false) {
             let _ = main.hide();
             session.hid_main.store(true, Ordering::SeqCst);
-            std::thread::sleep(Duration::from_millis(220));
         }
     }
+    if let Some(overlay) = app.get_webview_window("overlay") {
+        let _ = overlay.hide();
+    }
+    std::thread::sleep(Duration::from_millis(220));
 
     let result = (|| -> Result<(), String> {
         let cursor = app.cursor_position().map_err(|e| e.to_string())?;
@@ -59,17 +91,20 @@ pub fn begin(app: &AppHandle) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         let img = monitor.capture_image().map_err(|e| e.to_string())?;
         let scale = monitor.scale_factor().map_err(|e| e.to_string())? as f64;
-        let x = monitor.x().map_err(|e| e.to_string())? as f64 / scale;
-        let y = monitor.y().map_err(|e| e.to_string())? as f64 / scale;
+        let monitor_id = monitor.id().map_err(|e| e.to_string())?;
+        let mx = monitor.x().map_err(|e| e.to_string())?;
+        let my = monitor.y().map_err(|e| e.to_string())?;
 
         *session.frozen.lock().unwrap() = Some(img);
+        *session.monitor_id.lock().unwrap() = Some(monitor_id);
+        *session.mon_origin.lock().unwrap() = (mx, my);
 
         let window = WebviewWindowBuilder::new(app, "selector", WebviewUrl::App("selector.html".into()))
             .decorations(false)
             .always_on_top(true)
             .skip_taskbar(true)
             .resizable(false)
-            .position(x, y)
+            .position(mx as f64 / scale, my as f64 / scale)
             .inner_size(200.0, 200.0)
             .build()
             .map_err(|e| e.to_string())?;
@@ -113,17 +148,23 @@ pub async fn finish_selection(
     w: u32,
     h: u32,
 ) -> Result<(), String> {
-    let cropped = {
+    let (cropped, region) = {
         let guard = session.frozen.lock().unwrap();
         let img = guard.as_ref().ok_or("Görüntü yok")?;
         let x = x.min(img.width().saturating_sub(1));
         let y = y.min(img.height().saturating_sub(1));
         let w = w.min(img.width() - x).max(1);
         let h = h.min(img.height() - y).max(1);
-        image::imageops::crop_imm(img, x, y, w, h).to_image()
+        let (mon_x, mon_y) = *session.mon_origin.lock().unwrap();
+        (
+            image::imageops::crop_imm(img, x, y, w, h).to_image(),
+            Region { x, y, w, h, mon_x, mon_y },
+        )
     };
     let url = to_data_url(&cropped)?;
     *session.last.lock().unwrap() = Some(cropped);
+    *session.region.lock().unwrap() = Some(region);
+    session.last_ocr.lock().unwrap().clear();
     close_selector(&app);
     app.emit("captured", url).map_err(|e| e.to_string())?;
     run_ocr(app);
@@ -132,45 +173,59 @@ pub async fn finish_selection(
 
 pub fn run_ocr(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
-        let (img, lang) = {
-            let session = app.state::<Session>();
-            let img = session.last.lock().unwrap().clone();
-            let lang = session.lang.lock().unwrap().clone();
-            (img, lang)
-        };
-        let Some(img) = img else {
-            let _ = app.emit("ocr_result", serde_json::json!({ "error": "Görüntü yok" }));
-            return;
-        };
-
-        let ocr = tauri::async_runtime::spawn_blocking(move || {
-            crate::ocr::recognize(&img, lang.as_deref())
-        })
-        .await
-        .map_err(|e| e.to_string())
-        .and_then(|r| r);
-
-        let text = match ocr {
-            Ok(text) => {
-                let _ = app.emit("ocr_result", serde_json::json!({ "text": text }));
-                text
+        let session = app.state::<Session>();
+        let img = session.last.lock().unwrap().clone();
+        let lang = session.lang();
+        match img {
+            Some(img) => {
+                pipeline(&app, img, lang, false).await;
             }
-            Err(e) => {
-                let _ = app.emit("ocr_result", serde_json::json!({ "error": e }));
-                return;
+            None => {
+                let _ = app.emit("ocr_result", serde_json::json!({ "error": "Görüntü yok" }));
             }
-        };
+        }
+    });
+}
 
-        if text.trim().is_empty() {
+pub async fn pipeline(app: &AppHandle, img: RgbaImage, lang: Option<String>, live: bool) {
+    let ocr = tauri::async_runtime::spawn_blocking(move || {
+        crate::ocr::recognize(&img, lang.as_deref())
+    })
+    .await
+    .map_err(|e| e.to_string())
+    .and_then(|r| r);
+
+    let text = match ocr {
+        Ok(text) => text,
+        Err(e) => {
+            let _ = app.emit("ocr_result", serde_json::json!({ "error": e }));
             return;
         }
-        let translator = app.state::<crate::translate::Translator>();
-        let payload = match translator.translate(&text).await {
-            Ok(t) => serde_json::json!({ "text": t.text, "engine": t.engine, "cached": t.cached }),
-            Err(e) => serde_json::json!({ "error": e }),
-        };
-        let _ = app.emit("translation", payload);
-    });
+    };
+
+    let session = app.state::<Session>();
+    if live {
+        let mut last = session.last_ocr.lock().unwrap();
+        if *last == text {
+            return;
+        }
+        *last = text.clone();
+    }
+    let _ = app.emit("ocr_result", serde_json::json!({ "text": text }));
+    if text.trim().is_empty() {
+        return;
+    }
+
+    let translator = app.state::<crate::translate::Translator>();
+    let payload = match translator.translate(&text).await {
+        Ok(t) => {
+            *session.last_translation.lock().unwrap() = t.text.clone();
+            crate::overlay::show(app);
+            serde_json::json!({ "text": t.text, "engine": t.engine, "cached": t.cached })
+        }
+        Err(e) => serde_json::json!({ "error": e }),
+    };
+    let _ = app.emit("translation", payload);
 }
 
 #[tauri::command]
@@ -186,6 +241,7 @@ pub async fn set_ocr_lang(
 ) -> Result<(), String> {
     *session.lang.lock().unwrap() = if tag.is_empty() { None } else { Some(tag) };
     if session.last.lock().unwrap().is_some() {
+        session.last_ocr.lock().unwrap().clear();
         run_ocr(app);
     }
     Ok(())

@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Ana pencere izinleri",
-  "windows": ["main", "selector"],
+  "description": "Pencere izinleri",
+  "windows": ["main", "selector", "overlay"],
   "permissions": ["core:default"]
 }

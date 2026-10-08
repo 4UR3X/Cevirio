@@ -32,10 +32,12 @@
 
   <div class="row">
     <button id="go">Bölge seç</button>
+    <button class="ghost" id="live">Canlı mod: kapalı</button>
+    <button class="ghost" id="hide">Overlay'i gizle</button>
     <select id="lang" title="OCR dili"></select>
     <button class="ghost" id="toggle">Ayarlar</button>
-    <span style="opacity:.7"><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>X</kbd></span>
   </div>
+  <p class="sub" style="margin-top:10px"><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>X</kbd> bölge seç · <kbd>L</kbd> canlı mod · <kbd>H</kbd> overlay'i gizle</p>
 
   <div id="settings" class="card">
     <h3>Çeviri ayarları</h3>
@@ -128,6 +130,12 @@
 
     $("lang").addEventListener("change", e => invoke("set_ocr_lang", { tag: e.target.value }));
     $("go").addEventListener("click", () => invoke("start_capture"));
+    $("hide").addEventListener("click", () => invoke("hide_overlay"));
+    $("live").addEventListener("click", () => invoke("toggle_live").catch(err => { $("status").textContent = err; }));
+    listen("live_state", e => {
+      $("live").textContent = "Canlı mod: " + (e.payload ? "açık" : "kapalı");
+      $("live").style.background = e.payload ? "#2e9e5b" : "";
+    });
 
     listen("captured", e => {
       const img = $("preview");
