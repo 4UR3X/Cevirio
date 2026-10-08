@@ -1,8 +1,11 @@
 use std::{fs, path::PathBuf, sync::Mutex, time::Duration};
 
+use futures_util::future::join_all;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+
+const GOOGLE_CHUNK_CHARS: usize = 3000;
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(default)]
@@ -56,6 +59,7 @@ impl Translator {
         let db = Connection::open(dir.join("cache.db")).map_err(|e| e.to_string())?;
         db.execute_batch(
             "PRAGMA journal_mode=WAL;
+             PRAGMA synchronous=NORMAL;
              CREATE TABLE IF NOT EXISTS cache (
                  src TEXT NOT NULL,
                  sl TEXT NOT NULL,
@@ -69,6 +73,9 @@ impl Translator {
 
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(15))
+            .connect_timeout(Duration::from_secs(5))
+            .pool_idle_timeout(Duration::from_secs(120))
+            .tcp_nodelay(true)
             .user_agent("Cevirio/0.1")
             .build()
             .map_err(|e| e.to_string())?;
@@ -79,6 +86,15 @@ impl Translator {
             db: Mutex::new(db),
             client,
         })
+    }
+
+    pub async fn warmup(&self) {
+        let _ = self
+            .client
+            .get("https://translate.googleapis.com/translate_a/single")
+            .query(&[("client", "gtx"), ("sl", "en"), ("tl", "tr"), ("dt", "t"), ("q", "hi")])
+            .send()
+            .await;
     }
 
     pub fn settings(&self) -> Settings {
@@ -121,41 +137,68 @@ impl Translator {
     }
 
     pub async fn translate(&self, text: &str) -> Result<Translation, String> {
-        let text = normalize(text);
-        if text.is_empty() {
-            return Err("Çevrilecek metin yok".into());
-        }
+        self.translate_many(&[text.to_string()])
+            .await
+            .pop()
+            .unwrap_or_else(|| Err("Çevrilecek metin yok".into()))
+    }
+
+    pub async fn translate_many(&self, texts: &[String]) -> Vec<Result<Translation, String>> {
         let s = self.settings();
+        let norm: Vec<String> = texts.iter().map(|t| normalize(t)).collect();
+        let mut out: Vec<Option<Result<Translation, String>>> = vec![None; norm.len()];
 
-        if let Some((out, engine)) = self.cache_get(&text, &s.source_lang, &s.target_lang) {
-            return Ok(Translation { text: out, engine, cached: true });
+        for (i, t) in norm.iter().enumerate() {
+            if t.is_empty() {
+                out[i] = Some(Err("Çevrilecek metin yok".into()));
+            } else if let Some((text, engine)) = self.cache_get(t, &s.source_lang, &s.target_lang) {
+                out[i] = Some(Ok(Translation { text, engine, cached: true }));
+            }
         }
 
-        let mut errors = Vec::new();
+        let mut errors: Vec<String> = Vec::new();
         for engine in &s.engines {
+            let pending: Vec<usize> = (0..norm.len()).filter(|i| out[*i].is_none()).collect();
+            if pending.is_empty() {
+                break;
+            }
+            let batch: Vec<&str> = pending.iter().map(|&i| norm[i].as_str()).collect();
             let result = match engine.as_str() {
-                "google" => self.google(&text, &s).await,
-                "deepl" => self.deepl(&text, &s).await,
-                "openai" => self.openai(&text, &s).await,
+                "google" => self.google_batch(&batch, &s).await,
+                "deepl" => self.deepl_batch(&batch, &s).await,
+                "openai" => self.openai_batch(&batch, &s).await,
                 other => Err(format!("bilinmeyen motor: {other}")),
             };
             match result {
-                Ok(out) if !out.trim().is_empty() => {
-                    self.cache_put(&text, &s.source_lang, &s.target_lang, &out, engine);
-                    return Ok(Translation { text: out, engine: engine.clone(), cached: false });
+                Ok(list) if list.len() == batch.len() => {
+                    for (k, &i) in pending.iter().enumerate() {
+                        if list[k].trim().is_empty() {
+                            continue;
+                        }
+                        self.cache_put(&norm[i], &s.source_lang, &s.target_lang, &list[k], engine);
+                        out[i] = Some(Ok(Translation {
+                            text: list[k].clone(),
+                            engine: engine.clone(),
+                            cached: false,
+                        }));
+                    }
                 }
-                Ok(_) => errors.push(format!("{engine}: boş sonuç")),
+                Ok(_) => errors.push(format!("{engine}: yanıt eksik")),
                 Err(e) => errors.push(format!("{engine}: {e}")),
             }
         }
-        Err(if errors.is_empty() {
-            "Etkin çeviri motoru yok".into()
+
+        let message = if errors.is_empty() {
+            "Etkin çeviri motoru yok".to_string()
         } else {
             errors.join(" | ")
-        })
+        };
+        out.into_iter()
+            .map(|o| o.unwrap_or_else(|| Err(message.clone())))
+            .collect()
     }
 
-    async fn google(&self, text: &str, s: &Settings) -> Result<String, String> {
+    async fn google_single(&self, text: &str, s: &Settings) -> Result<String, String> {
         let resp = self
             .client
             .get("https://translate.googleapis.com/translate_a/single")
@@ -182,7 +225,66 @@ impl Translator {
             .collect::<String>())
     }
 
-    async fn deepl(&self, text: &str, s: &Settings) -> Result<String, String> {
+    async fn google_chunk(&self, texts: &[&str], s: &Settings) -> Result<Vec<String>, String> {
+        if texts.len() == 1 {
+            return Ok(vec![self.google_single(texts[0], s).await?]);
+        }
+        let mut query: Vec<(&str, &str)> = vec![
+            ("client", "gtx"),
+            ("sl", s.source_lang.as_str()),
+            ("tl", s.target_lang.as_str()),
+            ("dt", "t"),
+        ];
+        for t in texts {
+            query.push(("q", t));
+        }
+        let v: Value = self
+            .client
+            .get("https://translate.googleapis.com/translate_a/t")
+            .query(&query)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?
+            .error_for_status()
+            .map_err(|e| e.to_string())?
+            .json()
+            .await
+            .map_err(|e| e.to_string())?;
+        let items = v.as_array().ok_or("beklenmeyen yanıt")?;
+        items
+            .iter()
+            .map(|it| match it {
+                Value::String(s) => Ok(s.clone()),
+                Value::Array(a) => a
+                    .first()
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .ok_or_else(|| "beklenmeyen yanıt".to_string()),
+                _ => Err("beklenmeyen yanıt".to_string()),
+            })
+            .collect()
+    }
+
+    async fn google_batch(&self, texts: &[&str], s: &Settings) -> Result<Vec<String>, String> {
+        let mut chunks: Vec<Vec<&str>> = Vec::new();
+        let mut size = 0;
+        for t in texts {
+            if chunks.is_empty() || size + t.len() > GOOGLE_CHUNK_CHARS {
+                chunks.push(Vec::new());
+                size = 0;
+            }
+            chunks.last_mut().unwrap().push(t);
+            size += t.len();
+        }
+        let parts = join_all(chunks.iter().map(|c| self.google_chunk(c, s))).await;
+        let mut out = Vec::with_capacity(texts.len());
+        for p in parts {
+            out.extend(p?);
+        }
+        Ok(out)
+    }
+
+    async fn deepl_batch(&self, texts: &[&str], s: &Settings) -> Result<Vec<String>, String> {
         if s.deepl_key.is_empty() {
             return Err("API anahtarı girilmemiş".into());
         }
@@ -192,7 +294,7 @@ impl Translator {
             "api.deepl.com"
         };
         let mut body = json!({
-            "text": [text],
+            "text": texts,
             "target_lang": s.target_lang.to_uppercase(),
         });
         if s.source_lang != "auto" {
@@ -211,16 +313,20 @@ impl Translator {
             .json()
             .await
             .map_err(|e| e.to_string())?;
-        v["translations"][0]["text"]
-            .as_str()
-            .map(str::to_owned)
-            .ok_or_else(|| "beklenmeyen yanıt".into())
+        v["translations"]
+            .as_array()
+            .ok_or("beklenmeyen yanıt")?
+            .iter()
+            .map(|t| {
+                t["text"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| "beklenmeyen yanıt".to_string())
+            })
+            .collect()
     }
 
-    async fn openai(&self, text: &str, s: &Settings) -> Result<String, String> {
-        if s.openai_model.is_empty() {
-            return Err("model adı girilmemiş".into());
-        }
+    async fn openai_one(&self, text: &str, s: &Settings) -> Result<String, String> {
         let system = format!(
             "You are a professional game and software localization translator. Translate the user's text into the language with code '{}'. Keep names, numbers, placeholders and tags unchanged. Output only the translation, nothing else.",
             s.target_lang
@@ -251,6 +357,16 @@ impl Translator {
             .as_str()
             .map(|s| s.trim().to_owned())
             .ok_or_else(|| "beklenmeyen yanıt".into())
+    }
+
+    async fn openai_batch(&self, texts: &[&str], s: &Settings) -> Result<Vec<String>, String> {
+        if s.openai_model.is_empty() {
+            return Err("model adı girilmemiş".into());
+        }
+        join_all(texts.iter().map(|t| self.openai_one(t, s)))
+            .await
+            .into_iter()
+            .collect()
     }
 }
 

@@ -36,6 +36,7 @@ pub struct Session {
     last_ocr: Mutex<String>,
     pub last_blocks: Mutex<serde_json::Value>,
     pub live: AtomicBool,
+    pub live_gen: std::sync::atomic::AtomicU64,
 }
 
 impl Session {
@@ -47,6 +48,14 @@ impl Session {
     }
     pub fn lang(&self) -> Option<String> {
         self.lang.lock().unwrap().clone()
+    }
+    pub fn last_image(&self) -> Option<RgbaImage> {
+        self.last.lock().unwrap().clone()
+    }
+    pub fn set_target(&self, monitor_id: u32, region: Region) {
+        *self.monitor_id.lock().unwrap() = Some(monitor_id);
+        *self.region.lock().unwrap() = Some(region);
+        self.last_ocr.lock().unwrap().clear();
     }
 }
 
@@ -72,7 +81,7 @@ pub fn begin(app: &AppHandle) -> Result<(), String> {
         return Ok(());
     }
     let session = app.state::<Session>();
-    session.live.store(false, Ordering::SeqCst);
+    crate::live::stop(app);
 
     if let Some(main) = app.get_webview_window("main") {
         if main.is_visible().unwrap_or(false) && !main.is_minimized().unwrap_or(false) {
@@ -168,6 +177,7 @@ pub async fn finish_selection(
     *session.last_blocks.lock().unwrap() = serde_json::Value::Null;
     close_selector(&app);
     app.emit("captured", url).map_err(|e| e.to_string())?;
+    let _ = crate::live::start(&app);
     run_ocr(app);
     Ok(())
 }
@@ -189,6 +199,7 @@ pub fn run_ocr(app: AppHandle) {
 }
 
 pub async fn pipeline(app: &AppHandle, img: RgbaImage, lang: Option<String>, live: bool) {
+    let t0 = std::time::Instant::now();
     let img = std::sync::Arc::new(img);
     let ocr_img = img.clone();
     let ocr = tauri::async_runtime::spawn_blocking(move || {
@@ -197,10 +208,12 @@ pub async fn pipeline(app: &AppHandle, img: RgbaImage, lang: Option<String>, liv
     .await
     .map_err(|e| e.to_string())
     .and_then(|r| r);
+    let t_ocr = t0.elapsed().as_millis();
 
     let lines = match ocr {
         Ok(lines) => lines,
         Err(e) => {
+            crate::debug::log(&format!("OCR hatasi: {e}"));
             let _ = app.emit("ocr_result", serde_json::json!({ "error": e }));
             return;
         }
@@ -214,9 +227,9 @@ pub async fn pipeline(app: &AppHandle, img: RgbaImage, lang: Option<String>, liv
         .join("\n");
 
     let session = app.state::<Session>();
-    if live {
+    {
         let mut last = session.last_ocr.lock().unwrap();
-        if *last == text {
+        if live && *last == text {
             return;
         }
         *last = text.clone();
@@ -224,24 +237,27 @@ pub async fn pipeline(app: &AppHandle, img: RgbaImage, lang: Option<String>, liv
     let _ = app.emit("ocr_result", serde_json::json!({ "text": text }));
 
     let translator = app.state::<crate::translate::Translator>();
-    let texts: Vec<Option<String>> = blocks
-        .iter()
-        .map(|b| crate::blocks::translatable(&b.text).then(|| b.text.clone()))
-        .collect();
-    let mut results = Vec::with_capacity(texts.len());
-    for chunk in texts.chunks(8) {
-        let part = futures_util::future::join_all(chunk.iter().map(|t| {
-            let translator = &*translator;
-            async move {
-                match t {
-                    Some(t) => Some(translator.translate(t).await),
-                    None => None,
-                }
-            }
-        }))
-        .await;
-        results.extend(part);
+    let mut unique: Vec<String> = Vec::new();
+    for b in &blocks {
+        if crate::blocks::translatable(&b.text) && !unique.contains(&b.text) {
+            unique.push(b.text.clone());
+        }
     }
+    let translated = translator.translate_many(&unique).await;
+    let lookup: std::collections::HashMap<&str, &Result<crate::translate::Translation, String>> =
+        unique.iter().map(String::as_str).zip(translated.iter()).collect();
+    let results: Vec<Option<Result<crate::translate::Translation, String>>> = blocks
+        .iter()
+        .map(|b| lookup.get(b.text.as_str()).map(|r| (*r).clone()))
+        .collect();
+    let t_total = t0.elapsed().as_millis();
+    crate::debug::log(&format!(
+        "pipeline: ocr {t_ocr}ms, ceviri {}ms, toplam {t_total}ms, parca {}, benzersiz {}",
+        t_total - t_ocr,
+        blocks.len(),
+        unique.len()
+    ));
+
 
     let mut out: Vec<crate::blocks::BlockOut> = Vec::new();
     let mut first_error: Option<String> = None;
@@ -256,20 +272,7 @@ pub async fn pipeline(app: &AppHandle, img: RgbaImage, lang: Option<String>, liv
                 }
                 engine = t.engine.clone();
                 all_cached &= t.cached;
-                let (bg, fg) = crate::blocks::colors(&img, b.x, b.y, b.w, b.h);
-                let pad = 3.0;
-                let x = (b.x - pad).max(0.0);
-                let y = (b.y - pad).max(0.0);
-                out.push(crate::blocks::BlockOut {
-                    x,
-                    y,
-                    w: (b.x + b.w + pad).min(img.width() as f32) - x,
-                    h: (b.y + b.h + pad).min(img.height() as f32) - y,
-                    lines: b.lines,
-                    text: t.text,
-                    bg,
-                    fg,
-                });
+                out.push(crate::blocks::out_block(&img, b, t.text));
             }
             Some(Err(e)) => {
                 first_error.get_or_insert(e);

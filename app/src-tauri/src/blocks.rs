@@ -26,6 +26,7 @@ pub struct BlockOut {
     pub h: f32,
     pub lines: u32,
     pub text: String,
+    pub src: String,
     pub bg: String,
     pub fg: String,
 }
@@ -141,4 +142,22 @@ pub fn colors(img: &RgbaImage, x: f32, y: f32, w: f32, h: f32) -> (String, Strin
         .unwrap_or(if luma(bg) < 128.0 { [255, 255, 255] } else { [20, 20, 20] });
 
     (css(bg), css(fg))
+}
+
+pub fn out_block(img: &RgbaImage, b: &Block, text: String) -> BlockOut {
+    let (bg, fg) = colors(img, b.x, b.y, b.w, b.h);
+    let pad = 3.0;
+    let x = (b.x - pad).max(0.0);
+    let y = (b.y - pad).max(0.0);
+    BlockOut {
+        x,
+        y,
+        w: (b.x + b.w + pad).min(img.width() as f32) - x,
+        h: (b.y + b.h + pad).min(img.height() as f32) - y,
+        lines: b.lines,
+        text,
+        src: b.text.clone(),
+        bg,
+        fg,
+    }
 }

@@ -29,7 +29,9 @@ pub fn show(app: &AppHandle) {
             match built {
                 Ok(w) => {
                     let _ = w.set_ignore_cursor_events(true);
-                    let _ = w.set_content_protected(true);
+                    if !crate::debug::on() {
+                        let _ = w.set_content_protected(true);
+                    }
                     w
                 }
                 Err(_) => return,

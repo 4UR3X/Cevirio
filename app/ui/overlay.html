@@ -4,42 +4,103 @@
   <meta charset="utf-8" />
   <style>
     html, body { margin:0; width:100%; height:100%; background:transparent; overflow:hidden }
-    .blk { position:absolute; box-sizing:border-box; display:flex; align-items:center; justify-content:flex-start;
-           font-family:Segoe UI, Arial, sans-serif; font-weight:600; line-height:1.15; overflow:hidden; padding:0 2px; border-radius:3px }
+    .blk { position:absolute; box-sizing:border-box; font-family:"Segoe UI", Arial, sans-serif; font-weight:500;
+           padding:0 4px; border-radius:3px; overflow:hidden; display:flex; align-items:center }
     .one { white-space:nowrap }
-    .multi { white-space:normal; word-break:break-word }
+    .multi { white-space:normal; word-break:break-word; line-height:1.15 }
   </style>
 </head>
 <body>
   <script>
     const { invoke } = window.__TAURI__.core;
     const { listen } = window.__TAURI__.event;
+    const PAD = 3;
+    const DESCENDER = /[gjpqyQ,;()\[\]{}|]/;
 
-    function fit(el, h) {
-      let size = Math.max(9, Math.min(72, h * (el.dataset.lines > 1 ? 0.9 / el.dataset.lines : 0.85)));
-      el.style.fontSize = size + "px";
-      while (size > 8 && (el.scrollHeight > el.clientHeight + 1 || el.scrollWidth > el.clientWidth + 1)) {
-        size -= 1;
-        el.style.fontSize = size + "px";
+    function median(arr) {
+      const s = [...arr].sort((a, b) => a - b);
+      return s[Math.floor(s.length / 2)];
+    }
+
+    function estimateEm(b, k) {
+      const h = Math.max(6, b.h - 2 * PAD) * k;
+      if (b.lines > 1) return h / b.lines;
+      return h / (DESCENDER.test(b.src) ? 1.0 : 0.76);
+    }
+
+    function baseSizes(ems) {
+      const order = ems.map((em, i) => ({ em, i })).sort((a, b) => a.em - b.em);
+      const sizes = new Array(ems.length);
+      let cluster = [];
+      const flush = () => {
+        if (!cluster.length) return;
+        const size = median(cluster.map(c => c.em));
+        cluster.forEach(c => sizes[c.i] = size);
+        cluster = [];
+      };
+      for (const it of order) {
+        if (cluster.length && it.em > cluster[0].em * 1.22) flush();
+        cluster.push(it);
       }
+      flush();
+      return sizes;
+    }
+
+    function place(el, b, k, base, W, H) {
+      const left = b.x * k, top = b.y * k, bw = b.w * k, bh = b.h * k;
+      const multi = b.lines > 1;
+      const minSize = Math.max(9, base * 0.62);
+      let size = Math.max(9, base * 0.96);
+      Object.assign(el.style, { left: left + "px", top: top + "px", fontSize: size + "px" });
+
+      if (!multi) {
+        el.style.width = "auto";
+        el.style.minWidth = bw + "px";
+        el.style.height = "auto";
+        el.style.minHeight = bh + "px";
+        el.style.lineHeight = "1.1";
+        while (left + el.offsetWidth > W - 2 && size > minSize) {
+          size -= 1; el.style.fontSize = size + "px";
+        }
+        if (left + el.offsetWidth > W - 2) {
+          el.className = "blk multi";
+          el.style.width = Math.max(bw, Math.min(W - left - 2, bw * 1.25)) + "px";
+          el.style.minWidth = "0";
+          while (el.offsetHeight > bh * 2.2 && size > minSize) {
+            size -= 1; el.style.fontSize = size + "px";
+          }
+        }
+      } else {
+        el.style.width = Math.min(W - left - 2, bw * 1.35) + "px";
+        el.style.height = "auto";
+        el.style.minHeight = bh + "px";
+        while (el.offsetHeight > bh * 1.15 && size > minSize) {
+          size -= 1; el.style.fontSize = size + "px";
+        }
+      }
+
+      const h = el.offsetHeight;
+      let y = top + bh / 2 - h / 2;
+      y = Math.max(0, Math.min(H - h, y));
+      el.style.top = y + "px";
     }
 
     function render(blocks) {
       document.body.innerHTML = "";
-      if (!Array.isArray(blocks)) return;
+      if (!Array.isArray(blocks) || !blocks.length) return;
       const k = 1 / window.devicePixelRatio;
-      for (const b of blocks) {
+      const W = window.innerWidth, H = window.innerHeight;
+      const bases = baseSizes(blocks.map(b => estimateEm(b, k)));
+
+      blocks.forEach((b, i) => {
         const el = document.createElement("div");
         el.className = "blk " + (b.lines > 1 ? "multi" : "one");
-        el.dataset.lines = b.lines;
         el.textContent = b.text.replace(/\n/g, " ");
-        Object.assign(el.style, {
-          left: b.x * k + "px", top: b.y * k + "px", width: b.w * k + "px", height: b.h * k + "px",
-          background: b.bg, color: b.fg,
-        });
+        el.style.background = b.bg;
+        el.style.color = b.fg;
         document.body.append(el);
-        fit(el, b.h * k);
-      }
+        place(el, b, k, bases[i], W, H);
+      });
     }
 
     invoke("get_last_blocks").then(render);
