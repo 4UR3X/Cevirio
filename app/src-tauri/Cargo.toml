@@ -15,6 +15,8 @@ xcap = "0.9.8"
 tauri-plugin-global-shortcut = "2.4.0"
 base64 = "0.23.1"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "query", "rustls"] }
 
 [profile.release]
 lto = true
@@ -24,3 +26,6 @@ strip = true
 
 [target."cfg(windows)".dependencies]
 windows = { version = "0.62.2", features = ["Media_Ocr", "Graphics_Imaging", "Globalization", "Storage_Streams", "Foundation_Collections"] }
+
+[dev-dependencies]
+tokio = { version = "1.53.2", features = ["macros", "rt-multi-thread"] }

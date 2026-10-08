@@ -131,18 +131,45 @@ pub async fn finish_selection(
 }
 
 pub fn run_ocr(app: AppHandle) {
-    tauri::async_runtime::spawn_blocking(move || {
-        let session = app.state::<Session>();
-        let img = session.last.lock().unwrap().clone();
-        let lang = session.lang.lock().unwrap().clone();
-        let payload = match img {
-            None => serde_json::json!({ "error": "Görüntü yok" }),
-            Some(img) => match crate::ocr::recognize(&img, lang.as_deref()) {
-                Ok(text) => serde_json::json!({ "text": text }),
-                Err(e) => serde_json::json!({ "error": e }),
-            },
+    tauri::async_runtime::spawn(async move {
+        let (img, lang) = {
+            let session = app.state::<Session>();
+            let img = session.last.lock().unwrap().clone();
+            let lang = session.lang.lock().unwrap().clone();
+            (img, lang)
         };
-        let _ = app.emit("ocr_result", payload);
+        let Some(img) = img else {
+            let _ = app.emit("ocr_result", serde_json::json!({ "error": "Görüntü yok" }));
+            return;
+        };
+
+        let ocr = tauri::async_runtime::spawn_blocking(move || {
+            crate::ocr::recognize(&img, lang.as_deref())
+        })
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|r| r);
+
+        let text = match ocr {
+            Ok(text) => {
+                let _ = app.emit("ocr_result", serde_json::json!({ "text": text }));
+                text
+            }
+            Err(e) => {
+                let _ = app.emit("ocr_result", serde_json::json!({ "error": e }));
+                return;
+            }
+        };
+
+        if text.trim().is_empty() {
+            return;
+        }
+        let translator = app.state::<crate::translate::Translator>();
+        let payload = match translator.translate(&text).await {
+            Ok(t) => serde_json::json!({ "text": t.text, "engine": t.engine, "cached": t.cached }),
+            Err(e) => serde_json::json!({ "error": e }),
+        };
+        let _ = app.emit("translation", payload);
     });
 }
 

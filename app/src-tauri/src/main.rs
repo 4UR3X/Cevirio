@@ -2,7 +2,9 @@
 
 mod capture;
 mod ocr;
+mod translate;
 
+use tauri::Manager;
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 #[tauri::command]
@@ -33,6 +35,8 @@ fn main() {
                 .build(),
         )
         .setup(move |app| {
+            let dir = app.path().app_data_dir()?;
+            app.manage(translate::Translator::open(dir)?);
             app.global_shortcut().register(capture_key)?;
             Ok(())
         })
@@ -43,7 +47,11 @@ fn main() {
             capture::finish_selection,
             capture::cancel_selection,
             capture::ocr_languages,
-            capture::set_ocr_lang
+            capture::set_ocr_lang,
+            translate::translate_text,
+            translate::get_settings,
+            translate::save_settings,
+            translate::clear_cache
         ])
         .run(tauri::generate_context!())
         .expect("Çevirio başlatılamadı");

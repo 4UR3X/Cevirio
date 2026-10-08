@@ -4,61 +4,149 @@
   <meta charset="utf-8" />
   <title>Çevirio</title>
   <style>
-    body { font-family: Segoe UI, sans-serif; background:#12141a; color:#e8e8ee; margin:0; padding:24px; min-height:100vh; box-sizing:border-box }
-    h1 { margin:0 0 4px } .sub { opacity:.65; margin:0 0 20px }
+    * { box-sizing:border-box }
+    body { font-family: Segoe UI, sans-serif; background:#12141a; color:#e8e8ee; margin:0; padding:24px; min-height:100vh }
+    h1 { margin:0 0 4px } h3 { margin:0 0 10px } .sub { opacity:.65; margin:0 0 18px }
     button { background:#6c63ff; color:#fff; border:0; border-radius:8px; padding:10px 18px; font-size:15px; cursor:pointer }
-    button:hover { background:#7d75ff }
-    select { background:#2a2d38; color:#e8e8ee; border:0; border-radius:8px; padding:9px 12px; font-size:14px; margin-left:12px }
+    button:hover { background:#7d75ff } button.ghost { background:#2a2d38 } button.ghost:hover { background:#353947 }
+    select, input { background:#2a2d38; color:#e8e8ee; border:0; border-radius:8px; padding:9px 12px; font-size:14px }
+    input { width:100%; margin-bottom:8px }
+    label { display:block; font-size:13px; opacity:.75; margin:8px 0 4px }
     kbd { background:#2a2d38; border-radius:4px; padding:2px 6px }
-    #preview { margin-top:20px; max-width:100%; max-height:35vh; border:1px solid #2a2d38; border-radius:8px; display:none }
-    #status { margin-top:14px; opacity:.7 }
-    #text { margin-top:12px; background:#1b1e27; border:1px solid #2a2d38; border-radius:8px; padding:12px; white-space:pre-wrap; min-height:60px; display:none }
+    .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap }
+    .grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:16px }
+    .card { background:#1b1e27; border:1px solid #2a2d38; border-radius:10px; padding:14px }
+    .out { white-space:pre-wrap; min-height:60px }
+    #preview { max-width:100%; max-height:25vh; border-radius:8px; display:none; margin-top:12px }
+    #status { margin-top:12px; opacity:.7; font-size:13px }
+    #settings { display:none; margin-top:16px }
+    .tag { font-size:12px; opacity:.6; margin-top:8px }
+    .eng { display:flex; gap:14px; flex-wrap:wrap; margin:6px 0 }
+    .eng label { display:flex; align-items:center; gap:6px; margin:0; opacity:1 }
+    .eng input { width:auto; margin:0 }
   </style>
 </head>
 <body>
   <h1>Çevirio</h1>
   <p class="sub" id="info">Yükleniyor…</p>
-  <button id="go">Bölge seç</button>
-  <select id="lang" title="OCR dili"></select>
-  <span style="margin-left:12px;opacity:.7"><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>X</kbd></span>
+
+  <div class="row">
+    <button id="go">Bölge seç</button>
+    <select id="lang" title="OCR dili"></select>
+    <button class="ghost" id="toggle">Ayarlar</button>
+    <span style="opacity:.7"><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>X</kbd></span>
+  </div>
+
+  <div id="settings" class="card">
+    <h3>Çeviri ayarları</h3>
+    <div class="row">
+      <div><label>Kaynak dil</label><input id="sl" placeholder="auto" /></div>
+      <div><label>Hedef dil</label><input id="tl" placeholder="tr" /></div>
+    </div>
+    <label>Motor sırası (üstteki önce denenir, hata olursa sıradaki)</label>
+    <div class="eng" id="engines"></div>
+    <label>DeepL API anahtarı</label><input id="deepl" type="password" />
+    <label>OpenAI uyumlu adres (Ollama: http://localhost:11434/v1)</label><input id="obase" />
+    <label>Model adı</label><input id="omodel" placeholder="örn. qwen2.5:7b" />
+    <label>API anahtarı (yerel modelde boş bırak)</label><input id="okey" type="password" />
+    <div class="row">
+      <button id="save">Kaydet</button>
+      <button class="ghost" id="clear">Önbelleği temizle</button>
+      <span id="saved" style="opacity:.7"></span>
+    </div>
+  </div>
+
   <div id="status"></div>
   <img id="preview" alt="Yakalanan bölge" />
-  <div id="text"></div>
+
+  <div class="grid">
+    <div class="card"><h3>Okunan metin</h3><div class="out" id="text">—</div></div>
+    <div class="card"><h3>Çeviri</h3><div class="out" id="tr">—</div><div class="tag" id="engtag"></div></div>
+  </div>
+
   <script>
     const { invoke } = window.__TAURI__.core;
     const { listen } = window.__TAURI__.event;
     const $ = id => document.getElementById(id);
+    const ALL = [["google", "Google"], ["deepl", "DeepL"], ["openai", "OpenAI uyumlu / Yerel"]];
+    let order = [];
 
     invoke("app_info").then(i => { $("info").textContent = `v${i.version} · ${i.os}/${i.arch}`; });
 
     invoke("ocr_languages").then(list => {
       const sel = $("lang");
       sel.innerHTML = "";
-      sel.append(new Option("Otomatik (sistem dilleri)", ""));
-      list.forEach(l => sel.append(new Option(`${l.name} (${l.tag})`, l.tag)));
+      sel.append(new Option("OCR: Otomatik", ""));
+      list.forEach(l => sel.append(new Option(`OCR: ${l.name} (${l.tag})`, l.tag)));
     }).catch(() => {});
+
+    function renderEngines(enabled) {
+      const rest = ALL.map(a => a[0]).filter(k => !enabled.includes(k));
+      order = [...enabled, ...rest];
+      const box = $("engines");
+      box.innerHTML = "";
+      order.forEach(k => {
+        const name = ALL.find(a => a[0] === k)[1];
+        const l = document.createElement("label");
+        const c = document.createElement("input");
+        c.type = "checkbox"; c.checked = enabled.includes(k); c.dataset.key = k;
+        const up = document.createElement("button");
+        up.className = "ghost"; up.textContent = "↑"; up.style.padding = "2px 8px";
+        up.onclick = e => {
+          e.preventDefault();
+          const i = order.indexOf(k);
+          if (i > 0) { [order[i - 1], order[i]] = [order[i], order[i - 1]]; }
+          renderEngines(order.filter(x => box.querySelector(`[data-key=${x}]`).checked));
+        };
+        l.append(c, name, up);
+        box.append(l);
+      });
+    }
+
+    function enabledList() {
+      return [...$("engines").querySelectorAll("input")].filter(c => c.checked).map(c => c.dataset.key);
+    }
+
+    invoke("get_settings").then(s => {
+      $("sl").value = s.source_lang; $("tl").value = s.target_lang;
+      $("deepl").value = s.deepl_key; $("obase").value = s.openai_base;
+      $("omodel").value = s.openai_model; $("okey").value = s.openai_key;
+      renderEngines(s.engines);
+    });
+
+    $("toggle").onclick = () => { const s = $("settings"); s.style.display = s.style.display === "block" ? "none" : "block"; };
+    $("save").onclick = async () => {
+      await invoke("save_settings", { settings: {
+        source_lang: $("sl").value.trim() || "auto", target_lang: $("tl").value.trim() || "tr",
+        engines: enabledList(), deepl_key: $("deepl").value.trim(),
+        openai_base: $("obase").value.trim(), openai_key: $("okey").value.trim(), openai_model: $("omodel").value.trim(),
+      }});
+      $("saved").textContent = "Kaydedildi";
+      setTimeout(() => $("saved").textContent = "", 2000);
+    };
+    $("clear").onclick = async () => { await invoke("clear_cache"); $("saved").textContent = "Önbellek temizlendi"; };
 
     $("lang").addEventListener("change", e => invoke("set_ocr_lang", { tag: e.target.value }));
     $("go").addEventListener("click", () => invoke("start_capture"));
 
     listen("captured", e => {
       const img = $("preview");
-      img.src = e.payload;
-      img.style.display = "block";
-      img.onload = () => { $("status").textContent = `Yakalandı: ${img.naturalWidth}×${img.naturalHeight} px · OCR çalışıyor…`; };
-      $("text").style.display = "none";
+      img.src = e.payload; img.style.display = "block";
+      $("status").textContent = "OCR çalışıyor…";
+      $("text").textContent = "…"; $("tr").textContent = "…"; $("engtag").textContent = "";
     });
 
     listen("ocr_result", e => {
-      const box = $("text");
-      box.style.display = "block";
-      if (e.payload.error) {
-        $("status").textContent = "OCR hatası";
-        box.textContent = e.payload.error;
-      } else {
-        $("status").textContent = "OCR tamamlandı";
-        box.textContent = e.payload.text || "(metin bulunamadı)";
-      }
+      if (e.payload.error) { $("status").textContent = "OCR hatası"; $("text").textContent = e.payload.error; return; }
+      $("text").textContent = e.payload.text || "(metin bulunamadı)";
+      $("status").textContent = e.payload.text ? "Çevriliyor…" : "Metin bulunamadı";
+    });
+
+    listen("translation", e => {
+      if (e.payload.error) { $("status").textContent = "Çeviri hatası"; $("tr").textContent = e.payload.error; return; }
+      $("status").textContent = "Tamamlandı";
+      $("tr").textContent = e.payload.text;
+      $("engtag").textContent = (e.payload.cached ? "Önbellekten · " : "") + e.payload.engine;
     });
   </script>
 </body>
