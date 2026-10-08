@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod blocks;
 mod capture;
 mod live;
 mod ocr;
@@ -70,7 +71,7 @@ fn main() {
             translate::get_settings,
             translate::save_settings,
             translate::clear_cache,
-            overlay::get_last_translation,
+            overlay::get_last_blocks,
             overlay::hide_overlay,
             live::toggle_live
         ])

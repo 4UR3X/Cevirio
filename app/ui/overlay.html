@@ -4,31 +4,46 @@
   <meta charset="utf-8" />
   <style>
     html, body { margin:0; width:100%; height:100%; background:transparent; overflow:hidden }
-    #box { box-sizing:border-box; width:100%; height:100%; display:flex; align-items:center; justify-content:center; text-align:center;
-           background:rgba(10,12,18,.9); color:#fff; font-family:Segoe UI, sans-serif; font-weight:600; padding:6px 10px; border-radius:6px; line-height:1.25; word-break:break-word }
+    .blk { position:absolute; box-sizing:border-box; display:flex; align-items:center; justify-content:flex-start;
+           font-family:Segoe UI, Arial, sans-serif; font-weight:600; line-height:1.15; overflow:hidden; padding:0 2px; border-radius:3px }
+    .one { white-space:nowrap }
+    .multi { white-space:normal; word-break:break-word }
   </style>
 </head>
 <body>
-  <div id="box"></div>
   <script>
     const { invoke } = window.__TAURI__.core;
     const { listen } = window.__TAURI__.event;
-    const box = document.getElementById("box");
 
-    function fit() {
-      let size = 64;
-      box.style.fontSize = size + "px";
-      while (size > 10 && (box.scrollHeight > box.clientHeight || box.scrollWidth > box.clientWidth)) {
-        size -= 2;
-        box.style.fontSize = size + "px";
+    function fit(el, h) {
+      let size = Math.max(9, Math.min(72, h * (el.dataset.lines > 1 ? 0.9 / el.dataset.lines : 0.85)));
+      el.style.fontSize = size + "px";
+      while (size > 8 && (el.scrollHeight > el.clientHeight + 1 || el.scrollWidth > el.clientWidth + 1)) {
+        size -= 1;
+        el.style.fontSize = size + "px";
       }
     }
 
-    function set(text) { box.textContent = text; fit(); }
+    function render(blocks) {
+      document.body.innerHTML = "";
+      if (!Array.isArray(blocks)) return;
+      const k = 1 / window.devicePixelRatio;
+      for (const b of blocks) {
+        const el = document.createElement("div");
+        el.className = "blk " + (b.lines > 1 ? "multi" : "one");
+        el.dataset.lines = b.lines;
+        el.textContent = b.text.replace(/\n/g, " ");
+        Object.assign(el.style, {
+          left: b.x * k + "px", top: b.y * k + "px", width: b.w * k + "px", height: b.h * k + "px",
+          background: b.bg, color: b.fg,
+        });
+        document.body.append(el);
+        fit(el, b.h * k);
+      }
+    }
 
-    invoke("get_last_translation").then(set);
-    listen("translation", e => { if (e.payload.text) set(e.payload.text); });
-    window.addEventListener("resize", fit);
+    invoke("get_last_blocks").then(render);
+    listen("blocks", e => render(e.payload));
   </script>
 </body>
 </html>

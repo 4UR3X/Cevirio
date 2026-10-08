@@ -10,8 +10,8 @@ pub fn show(app: &AppHandle) {
 
     let x = region.mon_x + region.x as i32;
     let y = region.mon_y + region.y as i32;
-    let w = region.w.max(120);
-    let h = region.h.max(48);
+    let w = region.w.max(1);
+    let h = region.h.max(1);
 
     let window = match app.get_webview_window("overlay") {
         Some(w) => w,
@@ -43,8 +43,8 @@ pub fn show(app: &AppHandle) {
 }
 
 #[tauri::command]
-pub async fn get_last_translation(session: State<'_, Session>) -> Result<String, String> {
-    Ok(session.last_translation.lock().unwrap().clone())
+pub async fn get_last_blocks(session: State<'_, Session>) -> Result<serde_json::Value, String> {
+    Ok(session.last_blocks.lock().unwrap().clone())
 }
 
 #[tauri::command]

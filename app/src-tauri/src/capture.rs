@@ -34,7 +34,7 @@ pub struct Session {
     mon_origin: Mutex<(i32, i32)>,
     region: Mutex<Option<Region>>,
     last_ocr: Mutex<String>,
-    pub last_translation: Mutex<String>,
+    pub last_blocks: Mutex<serde_json::Value>,
     pub live: AtomicBool,
 }
 
@@ -165,6 +165,7 @@ pub async fn finish_selection(
     *session.last.lock().unwrap() = Some(cropped);
     *session.region.lock().unwrap() = Some(region);
     session.last_ocr.lock().unwrap().clear();
+    *session.last_blocks.lock().unwrap() = serde_json::Value::Null;
     close_selector(&app);
     app.emit("captured", url).map_err(|e| e.to_string())?;
     run_ocr(app);
@@ -188,20 +189,29 @@ pub fn run_ocr(app: AppHandle) {
 }
 
 pub async fn pipeline(app: &AppHandle, img: RgbaImage, lang: Option<String>, live: bool) {
+    let img = std::sync::Arc::new(img);
+    let ocr_img = img.clone();
     let ocr = tauri::async_runtime::spawn_blocking(move || {
-        crate::ocr::recognize(&img, lang.as_deref())
+        crate::ocr::recognize_lines(&ocr_img, lang.as_deref())
     })
     .await
     .map_err(|e| e.to_string())
     .and_then(|r| r);
 
-    let text = match ocr {
-        Ok(text) => text,
+    let lines = match ocr {
+        Ok(lines) => lines,
         Err(e) => {
             let _ = app.emit("ocr_result", serde_json::json!({ "error": e }));
             return;
         }
     };
+
+    let blocks = crate::blocks::group(lines);
+    let text = blocks
+        .iter()
+        .map(|b| b.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
 
     let session = app.state::<Session>();
     if live {
@@ -212,20 +222,85 @@ pub async fn pipeline(app: &AppHandle, img: RgbaImage, lang: Option<String>, liv
         *last = text.clone();
     }
     let _ = app.emit("ocr_result", serde_json::json!({ "text": text }));
-    if text.trim().is_empty() {
-        return;
-    }
 
     let translator = app.state::<crate::translate::Translator>();
-    let payload = match translator.translate(&text).await {
-        Ok(t) => {
-            *session.last_translation.lock().unwrap() = t.text.clone();
-            crate::overlay::show(app);
-            serde_json::json!({ "text": t.text, "engine": t.engine, "cached": t.cached })
+    let texts: Vec<Option<String>> = blocks
+        .iter()
+        .map(|b| crate::blocks::translatable(&b.text).then(|| b.text.clone()))
+        .collect();
+    let mut results = Vec::with_capacity(texts.len());
+    for chunk in texts.chunks(8) {
+        let part = futures_util::future::join_all(chunk.iter().map(|t| {
+            let translator = &*translator;
+            async move {
+                match t {
+                    Some(t) => Some(translator.translate(t).await),
+                    None => None,
+                }
+            }
+        }))
+        .await;
+        results.extend(part);
+    }
+
+    let mut out: Vec<crate::blocks::BlockOut> = Vec::new();
+    let mut first_error: Option<String> = None;
+    let mut engine = String::new();
+    let mut all_cached = true;
+    for (b, r) in blocks.iter().zip(results) {
+        match r {
+            Some(Ok(t)) => {
+                let same = normalize_cmp(&t.text) == normalize_cmp(&b.text);
+                if same {
+                    continue;
+                }
+                engine = t.engine.clone();
+                all_cached &= t.cached;
+                let (bg, fg) = crate::blocks::colors(&img, b.x, b.y, b.w, b.h);
+                let pad = 3.0;
+                let x = (b.x - pad).max(0.0);
+                let y = (b.y - pad).max(0.0);
+                out.push(crate::blocks::BlockOut {
+                    x,
+                    y,
+                    w: (b.x + b.w + pad).min(img.width() as f32) - x,
+                    h: (b.y + b.h + pad).min(img.height() as f32) - y,
+                    lines: b.lines,
+                    text: t.text,
+                    bg,
+                    fg,
+                });
+            }
+            Some(Err(e)) => {
+                first_error.get_or_insert(e);
+            }
+            None => {}
         }
-        Err(e) => serde_json::json!({ "error": e }),
+    }
+
+    let value = serde_json::to_value(&out).unwrap_or_default();
+    *session.last_blocks.lock().unwrap() = value.clone();
+    let _ = app.emit("blocks", value);
+    if !out.is_empty() {
+        crate::overlay::show(app);
+    }
+
+    let payload = match (out.is_empty(), first_error) {
+        (true, Some(e)) => serde_json::json!({ "error": e }),
+        _ => serde_json::json!({
+            "text": out.iter().map(|b| b.text.as_str()).collect::<Vec<_>>().join("\n"),
+            "engine": engine,
+            "cached": all_cached,
+        }),
     };
     let _ = app.emit("translation", payload);
+}
+
+fn normalize_cmp(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 #[tauri::command]
