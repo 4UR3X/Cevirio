@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8" />
+  <title>Çevirio</title>
+  <style>
+    body { font-family: Segoe UI, sans-serif; background:#12141a; color:#e8e8ee; display:grid; place-items:center; height:100vh; margin:0 }
+    .card { text-align:center } h1 { margin:0 0 8px } p { opacity:.7 }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Çevirio</h1>
+    <p id="info">Yükleniyor…</p>
+  </div>
+  <script>
+    window.__TAURI__.core.invoke("app_info").then(i => {
+      document.getElementById("info").textContent = `v${i.version} · ${i.os}/${i.arch} — çekirdek hazır`;
+    });
+  </script>
+</body>
+</html>
