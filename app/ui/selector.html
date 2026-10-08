@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8" />
+  <title>Bölge Seç</title>
+  <style>
+    html, body { margin:0; height:100%; overflow:hidden; cursor:crosshair; background:#000; user-select:none }
+    #shot { position:fixed; inset:0; width:100vw; height:100vh }
+    #dim { position:fixed; inset:0; background:rgba(0,0,0,.45) }
+    #box { position:fixed; border:2px solid #6c63ff; background:transparent; box-shadow:0 0 0 9999px rgba(0,0,0,.45); display:none }
+    #hint { position:fixed; top:12px; left:50%; transform:translateX(-50%); background:rgba(18,20,26,.85); color:#fff; font:14px Segoe UI,sans-serif; padding:8px 14px; border-radius:8px }
+  </style>
+</head>
+<body>
+  <img id="shot" alt="" draggable="false" />
+  <div id="dim"></div>
+  <div id="box"></div>
+  <div id="hint">Fareyle bölge seç · Esc: iptal</div>
+  <script>
+    const { invoke } = window.__TAURI__.core;
+    const shot = document.getElementById("shot");
+    const box = document.getElementById("box");
+    const dim = document.getElementById("dim");
+    let start = null;
+
+    invoke("get_frozen").then(url => { shot.src = url; });
+
+    window.addEventListener("keydown", e => { if (e.key === "Escape") invoke("cancel_selection"); });
+
+    window.addEventListener("mousedown", e => {
+      if (e.button !== 0) return;
+      start = { x: e.clientX, y: e.clientY };
+      dim.style.display = "none";
+      box.style.display = "block";
+      draw(e);
+    });
+
+    window.addEventListener("mousemove", e => { if (start) draw(e); });
+
+    function rect(e) {
+      const x = Math.min(start.x, e.clientX), y = Math.min(start.y, e.clientY);
+      return { x, y, w: Math.abs(e.clientX - start.x), h: Math.abs(e.clientY - start.y) };
+    }
+
+    function draw(e) {
+      const r = rect(e);
+      Object.assign(box.style, { left: r.x + "px", top: r.y + "px", width: r.w + "px", height: r.h + "px" });
+    }
+
+    window.addEventListener("mouseup", e => {
+      if (!start) return;
+      const r = rect(e);
+      start = null;
+      if (r.w < 4 || r.h < 4) { invoke("cancel_selection"); return; }
+      const sx = shot.naturalWidth / window.innerWidth;
+      const sy = shot.naturalHeight / window.innerHeight;
+      invoke("finish_selection", {
+        x: Math.round(r.x * sx), y: Math.round(r.y * sy),
+        w: Math.round(r.w * sx), h: Math.round(r.h * sy),
+      });
+    });
+  </script>
+</body>
+</html>

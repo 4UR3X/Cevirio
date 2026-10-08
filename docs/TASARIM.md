@@ -1,6 +1,6 @@
 # Çevirio – Tasarım Belgesi
 
-## MemoFast / benzeri araçların mantığı
+## Ekran çeviri araçlarının genel mantığı
 Bu tür araçlar iki yöntemden birini kullanır:
 1. **Ekran yakalama + OCR + overlay**: Ekrandaki bölge yakalanır, metin okunur, çevrilir, şeffaf bir pencerede üstüne yazılır. Oyuna dokunmaz → anti-cheat güvenli.
 2. **Oyun motoru hook/enjeksiyon** (Unity/Unreal): Oyun sürecine DLL enjekte edilir. Hızlı ama **ban riski** var.
