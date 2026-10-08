@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod capture;
+mod ocr;
 
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
@@ -40,7 +41,9 @@ fn main() {
             capture::start_capture,
             capture::get_frozen,
             capture::finish_selection,
-            capture::cancel_selection
+            capture::cancel_selection,
+            capture::ocr_languages,
+            capture::set_ocr_lang
         ])
         .run(tauri::generate_context!())
         .expect("Çevirio başlatılamadı");

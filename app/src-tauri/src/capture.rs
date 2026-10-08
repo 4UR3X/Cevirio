@@ -19,6 +19,7 @@ pub struct Session {
     frozen: Mutex<Option<RgbaImage>>,
     last: Mutex<Option<RgbaImage>>,
     hid_main: AtomicBool,
+    lang: Mutex<Option<String>>,
 }
 
 fn to_data_url(img: &RgbaImage) -> Result<String, String> {
@@ -124,7 +125,43 @@ pub async fn finish_selection(
     let url = to_data_url(&cropped)?;
     *session.last.lock().unwrap() = Some(cropped);
     close_selector(&app);
-    app.emit("captured", url).map_err(|e| e.to_string())
+    app.emit("captured", url).map_err(|e| e.to_string())?;
+    run_ocr(app);
+    Ok(())
+}
+
+pub fn run_ocr(app: AppHandle) {
+    tauri::async_runtime::spawn_blocking(move || {
+        let session = app.state::<Session>();
+        let img = session.last.lock().unwrap().clone();
+        let lang = session.lang.lock().unwrap().clone();
+        let payload = match img {
+            None => serde_json::json!({ "error": "Görüntü yok" }),
+            Some(img) => match crate::ocr::recognize(&img, lang.as_deref()) {
+                Ok(text) => serde_json::json!({ "text": text }),
+                Err(e) => serde_json::json!({ "error": e }),
+            },
+        };
+        let _ = app.emit("ocr_result", payload);
+    });
+}
+
+#[tauri::command]
+pub async fn ocr_languages() -> Result<Vec<crate::ocr::OcrLanguage>, String> {
+    crate::ocr::languages()
+}
+
+#[tauri::command]
+pub async fn set_ocr_lang(
+    app: AppHandle,
+    session: State<'_, Session>,
+    tag: String,
+) -> Result<(), String> {
+    *session.lang.lock().unwrap() = if tag.is_empty() { None } else { Some(tag) };
+    if session.last.lock().unwrap().is_some() {
+        run_ocr(app);
+    }
+    Ok(())
 }
 
 #[tauri::command]
