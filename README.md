@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/logo.png" alt="Çevirio" width="360" /></p>
+
 # Çevirio
 
 Hızlı, çapraz platform (Windows / Linux / macOS) ekran çeviri aracı. Ekran yakalama, OCR ve overlay ile çalışır; oyun veya uygulama sürecine müdahale etmez (enjeksiyon yok).
